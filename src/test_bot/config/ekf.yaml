@@ -1,0 +1,78 @@
+### EKF para el robot real (Jetson). robot_localization, ROS2 Eloquent.
+#
+# Cambios respecto al ekf.yaml original (Foxy/sim):
+#   - use_sim_time: false (robot real).
+#   - SIN imu0: el ESP32 no transmite IMU cruda (solo odometria fusionada).
+#     La IMU ya esta fusionada dentro de /odom por el ESP32.
+#   - odom0 = /odom proviene de esp32_bridge_node (twist vx + vyaw, y pose como
+#     referencia de yaw via el EKF local).
+#
+# Dos instancias:
+#   - ekf_filter_node_odom : world_frame=odom  -> publica TF odom->base_link.
+#   - ekf_filter_node_map  : world_frame=map   -> publica TF map->odom,
+#       corrigiendo deriva con /aruco_pose.
+
+### EKF LOCAL (odom -> base_link)
+ekf_filter_node_odom:
+  ros__parameters:
+    use_sim_time: false
+    frequency: 50.0
+    sensor_timeout: 0.1
+    two_d_mode: true
+    publish_tf: true
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: odom
+
+    odom0: /odom
+    # Del /odom usamos velocidades (vx, vyaw). El ESP32 ya integra la pose.
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, true,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 5
+
+
+### EKF GLOBAL (map -> odom)
+ekf_filter_node_map:
+  ros__parameters:
+    use_sim_time: false
+    frequency: 50.0
+    sensor_timeout: 0.1
+    two_d_mode: true
+    publish_tf: true
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: map
+
+    initial_state: [0.0, 0.0, 0.0,
+                    0.0, 0.0, 1.5708,
+                    0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0]
+
+    odom0: /odom
+    odom0_config: [false, false, false,
+                   false, false, false,
+                   true,  true,  false,
+                   false, false, true,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 5
+
+    # Correccion absoluta de pose en el frame map (x, y, yaw) desde ArUco.
+    pose0: /aruco_pose
+    pose0_config: [true,  true,  false,
+                   false, false, true,
+                   false, false, false,
+                   false, false, false,
+                   false, false, false]
+    pose0_differential: false
+    pose0_relative: false
+    pose0_queue_size: 3

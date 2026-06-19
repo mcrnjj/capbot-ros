@@ -1,0 +1,39 @@
+# Calibracion de la camara CSI (IMX219) a la resolucion de SALIDA del
+# csi_camera_node (output_width x output_height = 640x480 por defecto).
+#
+# >>> ESTOS VALORES SON UN PLACEHOLDER NOMINAL. RECALIBRA. <<<
+# La precision de aruco_localizer depende directamente de K y D.
+# Calibra con:  ros2 run camera_calibration cameracalibrator ...
+# a ESTA misma resolucion (o reescala K si calibras a otra).
+#
+# fx,fy nominales estimados desde un FOV horizontal ~62 deg a 640 px de ancho.
+image_width: 640
+image_height: 480
+camera_name: imx219_csi
+distortion_model: plumb_bob
+
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [530.0,   0.0, 320.0,
+           0.0, 530.0, 240.0,
+           0.0,   0.0,   1.0]
+
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [1.0, 0.0, 0.0,
+         0.0, 1.0, 0.0,
+         0.0, 0.0, 1.0]
+
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [530.0,   0.0, 320.0, 0.0,
+           0.0, 530.0, 240.0, 0.0,
+           0.0,   0.0,   1.0, 0.0]

@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>test_bot</name>
+  <version>0.1.0</version>
+  <description>Stack autonomo del Capbot para Jetson Nano (ROS2 Eloquent / Ubuntu 18.04).
+  Port del paquete test_bot original (Foxy). Localizacion ArUco + EKF, camara CSI
+  (IMX219 via nvarguscamerasrc), puente serie al ESP32 (COBS+CRC16) y NAV2.</description>
+  <maintainer email="mcornejoal04@gmail.com">Manuel Cornejo</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- Runtime: nodos Python -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>xacro</exec_depend>
+
+  <!-- Localizacion -->
+  <exec_depend>robot_localization</exec_depend>
+
+  <!-- NAV2 (Eloquent). OJO: 'nav2_recoveries' existe en Eloquent; en distros
+       posteriores se renombro a 'nav2_behaviors'. Validar contra lo instalado. -->
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>nav2_planner</exec_depend>
+  <exec_depend>nav2_controller</exec_depend>
+  <exec_depend>nav2_recoveries</exec_depend>
+  <exec_depend>nav2_bt_navigator</exec_depend>
+  <exec_depend>nav2_waypoint_follower</exec_depend>
+
+  <!-- Dependencias Python que NO vienen por rosdep en Eloquent/JetPack:
+       instalar con pip3:  numpy scipy pyserial
+       (OpenCV 4.1.1 viene con JetPack; cv_bridge usa esa). -->
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,90 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <!-- ============================================================== -->
+    <!--  VL53L0X TIME-OF-FLIGHT MACRO                                  -->
+    <!--  Real device: 30 mm – 2 m range, ~25° FoV, up to 50 Hz         -->
+    <!-- ============================================================== -->
+
+    <xacro:macro name="vl53l0x_tof" params="name xyz rpy:='0 0 0'">
+
+        <joint name="${name}_joint" type="fixed">
+            <parent link="chassis"/>
+            <child link="${name}_link"/>
+            <origin xyz="${xyz}" rpy="${rpy}"/>
+        </joint>
+
+        <link name="${name}_link">
+            <visual>
+                <geometry>
+                    <box size="0.005 0.02 0.01"/>
+                </geometry>
+                <material name="black"/>
+            </visual>
+            <collision>
+                <geometry>
+                    <box size="0.005 0.02 0.01"/>
+                </geometry>
+            </collision>
+            <xacro:inertial_box mass="0.005" x="0.005" y="0.02" z="0.01">
+                <origin xyz="0 0 0" rpy="0 0 0"/>
+            </xacro:inertial_box>
+        </link>
+
+        <gazebo reference="${name}_link">
+            <material>Gazebo/Black</material>
+            <sensor name="${name}_sensor" type="ray">
+                <pose>0 0 0 0 0 0</pose>
+                <visualize>true</visualize>
+                <update_rate>20</update_rate>
+                <ray>
+                    <!-- 5x5 rays spread over ±12.5° to emulate the 25° cone -->
+                    <scan>
+                        <horizontal>
+                            <samples>5</samples>
+                            <resolution>1</resolution>
+                            <min_angle>-0.2182</min_angle>
+                            <max_angle> 0.2182</max_angle>
+                        </horizontal>
+                        <vertical>
+                            <samples>5</samples>
+                            <resolution>1</resolution>
+                            <min_angle>-0.2182</min_angle>
+                            <max_angle> 0.2182</max_angle>
+                        </vertical>
+                    </scan>
+                    <range>
+                        <min>0.03</min>
+                        <max>2.0</max>
+                        <resolution>0.001</resolution>
+                    </range>
+                    <noise>
+                        <type>gaussian</type>
+                        <mean>0.0</mean>
+                        <stddev>0.01</stddev>
+                    </noise>
+                </ray>
+                <plugin name="${name}_controller" filename="libgazebo_ros_ray_sensor.so">
+                    <ros>
+                        <remapping>~/out:=${name}/range</remapping>
+                    </ros>
+                    <output_type>sensor_msgs/Range</output_type>
+                    <radiation_type>infrared</radiation_type>
+                    <frame_name>${name}_link</frame_name>
+                </plugin>
+            </sensor>
+        </gazebo>
+
+    </xacro:macro>
+
+
+    <!-- ============================================================== -->
+    <!--  INSTANTIATE THE TWO TOF SENSORS AT THE FRONT CORNERS          -->
+    <!--  Chassis front face is at x=0.23 in the chassis frame,         -->
+    <!--  side edges at y=±0.10, mid-height z=0.075                     -->
+    <!-- ============================================================== -->
+
+    <xacro:vl53l0x_tof name="tof_left"  xyz="0.2  0.09 0.13"/>
+    <xacro:vl53l0x_tof name="tof_right" xyz="0.2 -0.09 0.13"/>
+
+</robot>

@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<!--
+    URDF del robot REAL (Jetson). Variante de robot.urdf.xacro sin las piezas
+    que solo aplican a simulacion/hardware ausente:
+      - SIN lidar.xacro        (el robot no tiene LIDAR)
+      - SIN gazebo_control.xacro (plugin diff-drive de Gazebo)
+
+    Se conservan robot_core (cadena cinematica + base_link/chassis), camera
+    (frames camera_link / camera_link_optical que usa aruco_localizer) e imu
+    (solo el link imu_link, para paridad de frames; el <gazebo> se ignora fuera
+    de Gazebo). robot_state_publisher ignora todas las etiquetas <gazebo>.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="robot">
+
+    <xacro:include filename="robot_core.xacro" />
+    <xacro:include filename="camera.xacro" />
+    <xacro:include filename="imu.xacro" />
+
+</robot>

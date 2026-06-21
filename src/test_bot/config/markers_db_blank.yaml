@@ -1,0 +1,3 @@
+aruco_dict: DICT_5X5_250
+marker_size: 0.1
+markers: []

@@ -4,3 +4,4 @@ build/
 install/
 log/
 markers_print/
+src/robot_localization/

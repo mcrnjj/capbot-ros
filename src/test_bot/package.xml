@@ -11,13 +11,16 @@
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
-  <!-- Runtime: nodos Python -->
+  <!-- esp32_bridge_node (C++) -->
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf2_ros</depend>
+
+  <!-- Runtime: nodos Python (aruco_localizer, csi_camera_node) -->
   <exec_depend>rclpy</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>geometry_msgs</exec_depend>
-  <exec_depend>nav_msgs</exec_depend>
-  <exec_depend>tf2_ros</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>xacro</exec_depend>

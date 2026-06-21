@@ -50,6 +50,7 @@ def generate_launch_description():
         package='robot_state_publisher',
         node_executable='robot_state_publisher',
         output='screen',
+        arguments=[xacro_file],
         parameters=[{'robot_description': robot_description, 'use_sim_time': False}],
     )
 
@@ -75,9 +76,8 @@ def generate_launch_description():
             'base_frame': 'base_link',
             'map_frame': 'map',
             'publish_odom_tf': False,   # el EKF local publica odom->base_link
-            'wheel_separation': 0.226,
-            'wheel_radius': 0.035,
-            'max_wheel_speed': 6.0,     # rad/s a comando full-scale; ajustar a motor real
+            'max_linear_speed': 0.3,    # m/s; ajustar a velocidad maxima real del robot
+            'max_angular_speed': 2.0,   # rad/s; idem
             'cmd_vel_timeout': 0.5,
         }],
     )

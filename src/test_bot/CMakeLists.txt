@@ -7,6 +7,11 @@ if(NOT CMAKE_CXX_STANDARD)
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 # Instala assets (config, descripcion, launch, mapas).
 install(
@@ -26,10 +31,14 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
   RENAME csi_camera_node
 )
-install(PROGRAMS
-  scripts/esp32_bridge_node.py
+
+# esp32_bridge_node: en C++ (el puente real con capbot-jetson-bridge no
+# necesita Python; ver src/esp32_bridge_node.cpp).
+add_executable(esp32_bridge_node src/esp32_bridge_node.cpp)
+ament_target_dependencies(esp32_bridge_node
+  rclcpp std_msgs geometry_msgs nav_msgs tf2_ros)
+install(TARGETS esp32_bridge_node
   DESTINATION lib/${PROJECT_NAME}
-  RENAME esp32_bridge_node
 )
 
 if(BUILD_TESTING)

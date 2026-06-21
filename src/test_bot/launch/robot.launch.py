@@ -50,7 +50,7 @@ def generate_launch_description():
         package='robot_state_publisher',
         node_executable='robot_state_publisher',
         output='screen',
-        arguments=[xacro_file],
+        arguments=[{'robot_description': robot_description}],
         parameters=[{'robot_description': robot_description, 'use_sim_time': False}],
     )
 

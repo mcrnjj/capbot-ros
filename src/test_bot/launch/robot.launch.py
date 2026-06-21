@@ -7,7 +7,9 @@ OJO SINTAXIS ELOQUENT: la accion Node usa 'node_executable' y 'node_name'
 Trae:
   - robot_state_publisher (URDF real, sin lidar/gazebo)
   - csi_camera_node      (camara CSI -> /camera/image_raw + /camera/camera_info)
-  - esp32_bridge_node    (serie ESP32 <-> /odom ; /cmd_vel -> VEL_CMD)
+  - esp32_bridge_node    (puente a capbot-jetson-bridge: from_bridge -> /odom ;
+                          /cmd_vel -> to_bridge. El servicio jetson-bridge,
+                          en OTRO proceso, es quien tiene el puerto serie.)
   - aruco_localizer      (-> /aruco_pose)
   - ekf x2 (robot_localization): local (odom->base_link) y global (map->odom)
   - [si enable_nav:=true] map_server + NAV2 (planner/controller/recoveries/
@@ -35,7 +37,6 @@ def generate_launch_description():
     map_name = LaunchConfiguration('map_name')
     map_file = LaunchConfiguration('map_file')
     markers_db = LaunchConfiguration('markers_db')
-    serial_port = LaunchConfiguration('serial_port')
 
     nav2_params = os.path.join(PKG, 'config', 'nav2_params.yaml')
     ekf_params = os.path.join(PKG, 'config', 'ekf.yaml')
@@ -70,12 +71,14 @@ def generate_launch_description():
         package='test_bot', node_executable='esp32_bridge_node',
         node_name='esp32_bridge_node', output='screen',
         parameters=[{
-            'serial_port': serial_port,
-            'baudrate': 115200,
             'odom_frame': 'odom',
             'base_frame': 'base_link',
+            'map_frame': 'map',
             'publish_odom_tf': False,   # el EKF local publica odom->base_link
-            'esp32_mode': 1,
+            'wheel_separation': 0.226,
+            'wheel_radius': 0.035,
+            'max_wheel_speed': 6.0,     # rad/s a comando full-scale; ajustar a motor real
+            'cmd_vel_timeout': 0.5,
         }],
     )
 
@@ -172,7 +175,6 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'markers_db',
             default_value=[PKG, '/config/markers_db_', map_name, '.yaml']),
-        DeclareLaunchArgument('serial_port', default_value='/dev/ttyTHS1'),
 
         rsp, camera, esp32, aruco, ekf_odom, ekf_map,
         map_server, planner, controller, recoveries, bt_nav, wp_follower,

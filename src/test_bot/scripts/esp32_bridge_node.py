@@ -1,399 +1,222 @@
 #!/usr/bin/env python3
 """
-esp32_bridge_node.py
---------------------
-Puente ROS2 <-> ESP32 para el Capbot (Jetson Nano, ROS2 Eloquent).
+esp32_bridge_node.py - puente ROS2 <-> servicio capbot-jetson-bridge.
 
-Reemplaza, para el modo autonomo, al servicio teleop `capbot-jetson-bridge`:
-habla el MISMO protocolo serie (COBS + CRC16-CCITT, /dev/ttyTHS1 @115200) pero
-expone interfaces ROS:
+El servicio capbot-jetson-bridge corre en OTRO proceso (asyncio, fuera de
+este workspace) y posee el puerto serie hacia el ESP32. Ese servicio expone
+su propio nodo ROS2 ('capbot_jetson_bridge', ver ros_bridge.py en ese repo)
+con dos tópicos sin tipo propio (std_msgs/Float32MultiArray):
 
-  Publica:
-    /odom              nav_msgs/Odometry   (desde la telemetria 'odo' del ESP32)
+  from_bridge  (lo publica el servicio jetson-bridge, lo suscribimos aquí)
+      [x, y, theta, v, w, setpoint_x, setpoint_y, setpoint_theta]
+      - x, y, theta, v, w: odometría reportada por el ESP32 (pose absoluta +
+        velocidad lineal/angular).
+      - setpoint_x/y/theta: última meta de posición que el host (Nav2, vía
+        UDP) le mandó al ESP32 para su controlador autónomo on-board; se
+        republica sólo a modo de diagnóstico/visualización.
 
-  Suscribe:
-    /cmd_vel           geometry_msgs/Twist (de NAV2 -> VEL_CMD al ESP32)
+  to_bridge    (lo publicamos aquí, lo suscribe el servicio jetson-bridge)
+      [left, right, stop]
+      - left, right: comando de motor en unidades crudas del firmware
+        (rango [-CMD_FULL_SCALE, +CMD_FULL_SCALE], ver MotorDriver.h en el
+        firmware ESP32). NO son velocidades físicas; este nodo hace la
+        cinemática diferencial + escalado a partir de /cmd_vel.
+      - stop: != 0 frena ya e ignora left/right.
 
-Arquitectura de control (decidida para este port):
-  NAV2 controller -> /cmd_vel (v, w) -> este nodo -> VEL_CMD (0x16) -> ESP32,
-  que alimenta sus PID de velocidad internos (linearVelPid / angularVelPid).
-
-  >>> REQUIERE UN CAMBIO DE FIRMWARE EN capbot-ESP32 <<<
-  Hoy el firmware NO tiene VEL_CMD (0x16). Hay que anadirlo: nuevo MsgType que
-  reciba <ff> = (v_m_s, w_rad_s) y los use como setpoint de velocidad, en un modo
-  de velocidad. Ver README (seccion "Cambio de firmware requerido"). Mientras no
-  exista, el ESP32 ignorara el frame (su framing COBS+CRC lo valida y descarta el
-  tipo desconocido sin corromper el stream), asi que el puente es seguro de correr.
-
-Telemetria del ESP32 (JSON, MsgType 0x20):
-  {mode, u:{pwm_left,pwm_right}, odo:{x,y,a(grados),v(m/s),w(grados/s)}, sp, error}
-  Solo usamos 'odo'. La IMU cruda no se transmite (el ESP32 ya fusiona internamente).
-
-TF: por defecto este nodo NO publica odom->base_link, porque de eso se encarga el
-EKF local de robot_localization (ekf.yaml: publish_tf=true). Si corres SIN EKF,
-pon publish_odom_tf:=true.
+Este nodo es un nodo ROS2 normal (sin asyncio ni hilos propios): traduce
+from_bridge a nav_msgs/Odometry (+ TF opcional) para que lo consuma el EKF
+(ver config/ekf.yaml) y a un PoseStamped de diagnóstico para el setpoint de
+Nav2, y traduce /cmd_vel a comandos de rueda para to_bridge, con un watchdog
+que frena si /cmd_vel deja de llegar.
 """
-
-import sys
 import math
-import json
-import struct
-import threading
 
 import rclpy
 from rclpy.node import Node
 
+from std_msgs.msg import Float32MultiArray
+from geometry_msgs.msg import Twist, PoseStamped, TransformStamped
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Twist, TransformStamped
 from tf2_ros import TransformBroadcaster
 
-try:
-    import serial
-except ImportError:
-    serial = None
+# Rango de comando crudo que espera el firmware del ESP32 (ver
+# capbot-ESP32/include/Config.h::CMD_FULL_SCALE e int16 del frame MOTOR_CMD).
+_CMD_FULL_SCALE = 32767.0
+
+# Cantidad de floats esperados en from_bridge.
+_FROM_BRIDGE_LEN = 8
 
 
-# =============================================================================
-# Framing COBS + CRC16 (embebido; byte-compatible con capbot-ESP32 / bridge)
-# =============================================================================
-DELIMITER = 0x00
-
-# MsgType — mantener sincronizado con capbot-ESP32/include/Config.h
-MOTOR_CMD     = 0x10
-BRAKE_ON      = 0x11
-HEARTBEAT     = 0x12
-PID_PARAM     = 0x13
-SETPOINT_COMP = 0x14
-MODE_CMD      = 0x15
-VEL_CMD       = 0x16   # NUEVO (requiere soporte en firmware)
-TELEMETRY     = 0x20
-ESP_HELLO     = 0x21
+def _yaw_to_quat(yaw: float):
+    half = yaw / 2.0
+    return 0.0, 0.0, math.sin(half), math.cos(half)
 
 
-def crc16_ccitt(data, init=0xFFFF):
-    crc = init
-    for b in data:
-        crc ^= b << 8
-        for _ in range(8):
-            if crc & 0x8000:
-                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
-            else:
-                crc = (crc << 1) & 0xFFFF
-    return crc
-
-
-def cobs_encode(data):
-    out = bytearray([0])
-    code_idx = 0
-    code = 1
-    for b in data:
-        if b == 0:
-            out[code_idx] = code
-            code_idx = len(out)
-            out.append(0)
-            code = 1
-        else:
-            out.append(b)
-            code += 1
-            if code == 0xFF:
-                out[code_idx] = code
-                code_idx = len(out)
-                out.append(0)
-                code = 1
-    out[code_idx] = code
-    return bytes(out)
-
-
-def cobs_decode(data):
-    out = bytearray()
-    i = 0
-    n = len(data)
-    while i < n:
-        code = data[i]
-        if code == 0:
-            raise ValueError("cero inesperado en stream COBS")
-        end = i + code
-        if end > n:
-            raise ValueError("codigo COBS se pasa del final")
-        out.extend(data[i + 1:end])
-        i = end
-        if code < 0xFF and i < n:
-            out.append(0)
-    return bytes(out)
-
-
-def pack_frame(msg_type, payload):
-    raw = struct.pack("<BB", msg_type & 0xFF, len(payload)) + payload
-    raw += struct.pack("<H", crc16_ccitt(raw))
-    return cobs_encode(raw) + bytes([DELIMITER])
-
-
-def unpack_frame(encoded):
-    """encoded sin el delimitador final. Devuelve (msg_type, payload) o lanza."""
-    raw = cobs_decode(encoded)
-    if len(raw) < 4:
-        raise ValueError("frame truncado")
-    msg_type, length = raw[0], raw[1]
-    if len(raw) != 2 + length + 2:
-        raise ValueError("longitud inconsistente")
-    payload = raw[2:2 + length]
-    (crc_recv,) = struct.unpack("<H", raw[2 + length:])
-    if crc_recv != crc16_ccitt(raw[:2 + length]):
-        raise ValueError("CRC invalido")
-    return msg_type, payload
-
-
-class FrameBuffer:
-    """Acumula bytes y entrega frames completos al ver 0x00."""
-
-    def __init__(self, max_frame_bytes=512):
-        self._buf = bytearray()
-        self._max = max_frame_bytes
-
-    def feed(self, data):
-        frames = []
-        for b in data:
-            if b == DELIMITER:
-                if self._buf:
-                    try:
-                        frames.append(unpack_frame(bytes(self._buf)))
-                    except ValueError:
-                        pass
-                    self._buf.clear()
-            else:
-                self._buf.append(b)
-                if len(self._buf) > self._max:
-                    self._buf.clear()
-        return frames
-
-
-# Builders
-def build_heartbeat():
-    return pack_frame(HEARTBEAT, b"")
-
-
-def build_brake():
-    return pack_frame(BRAKE_ON, b"")
-
-
-def build_mode(mode):
-    return pack_frame(MODE_CMD, struct.pack("<B", mode & 0xFF))
-
-
-def build_vel(v_mps, w_rps):
-    # Contrato propuesto: <ff> = (velocidad lineal m/s, velocidad angular rad/s)
-    return pack_frame(VEL_CMD, struct.pack("<ff", float(v_mps), float(w_rps)))
-
-
-# =============================================================================
-# Nodo
-# =============================================================================
 class Esp32BridgeNode(Node):
-    def __init__(self):
-        super().__init__("esp32_bridge_node")
+    def __init__(self) -> None:
+        super().__init__('esp32_bridge_node')
 
-        self.declare_parameter("serial_port", "/dev/ttyTHS1")
-        self.declare_parameter("baudrate", 115200)
-        self.declare_parameter("odom_frame", "odom")
-        self.declare_parameter("base_frame", "base_link")
-        self.declare_parameter("publish_odom_tf", False)   # EKF lo publica
-        self.declare_parameter("heartbeat_period", 0.05)   # 50 ms
-        self.declare_parameter("cmd_vel_timeout", 0.5)     # s sin cmd_vel -> frena
-        self.declare_parameter("esp32_mode", 1)            # 1 = autonomo/velocidad
-        self.declare_parameter("send_mode_on_start", True)
+        self.declare_parameter('odom_frame', 'odom')
+        self.declare_parameter('base_frame', 'base_link')
+        self.declare_parameter('map_frame', 'map')
+        self.declare_parameter('publish_odom_tf', False)
+        self.declare_parameter('wheel_separation', 0.226)
+        self.declare_parameter('wheel_radius', 0.035)
+        # rad/s de rueda que corresponde a comando full-scale (+-32767).
+        # Placeholder: ajustar a la velocidad máxima real de los motores.
+        self.declare_parameter('max_wheel_speed', 6.0)
+        self.declare_parameter('cmd_vel_timeout', 0.5)
+        self.declare_parameter('twist_linear_variance', 0.01)
+        self.declare_parameter('twist_angular_variance', 0.02)
 
-        gp = self.get_parameter
-        self.port = gp("serial_port").value
-        self.baud = gp("baudrate").value
-        self.odom_frame = gp("odom_frame").value
-        self.base_frame = gp("base_frame").value
-        self.publish_tf = gp("publish_odom_tf").value
-        self.hb_period = float(gp("heartbeat_period").value)
-        self.cmd_timeout = float(gp("cmd_vel_timeout").value)
-        self.esp32_mode = int(gp("esp32_mode").value)
-        self.send_mode = gp("send_mode_on_start").value
+        self._last_cmd_vel_time = None
+        self._cmd_vel_stopped = False
 
-        if serial is None:
-            self.get_logger().fatal("pyserial no instalado: pip3 install pyserial")
-            sys.exit(1)
+        self._pub_odom = self.create_publisher(Odometry, 'odom', 10)
+        self._pub_to_bridge = self.create_publisher(Float32MultiArray, 'to_bridge', 10)
+        self._pub_setpoint_echo = self.create_publisher(
+            PoseStamped, 'esp32_bridge/setpoint_echo', 10)
+        self._tf_broadcaster = TransformBroadcaster(self)
 
-        self.odom_pub = self.create_publisher(Odometry, "/odom", 10)
-        self.tf_broadcaster = TransformBroadcaster(self) if self.publish_tf else None
-        self.create_subscription(Twist, "/cmd_vel", self.on_cmd_vel, 10)
-
-        self._buffer = FrameBuffer()
-        self._ser = None
-        self._tx_lock = threading.Lock()
-        self._last_cmd_time = self.get_clock().now()
-        self._running = True
-
-        # Hilo de lectura serie (pyserial es bloqueante).
-        self._reader = threading.Thread(target=self._reader_loop, daemon=True)
-        self._reader.start()
-
-        # Timers ROS para heartbeat y watchdog de cmd_vel.
-        self.create_timer(self.hb_period, self._send_heartbeat)
-        self.create_timer(0.1, self._cmd_watchdog)
-
-        if self.send_mode:
-            # Se reintenta en _open_port tambien, por si el puerto aun no abre.
-            self._pending_mode = True
-        else:
-            self._pending_mode = False
+        self.create_subscription(Float32MultiArray, 'from_bridge', self._on_from_bridge, 10)
+        self.create_subscription(Twist, 'cmd_vel', self._on_cmd_vel, 10)
+        self.create_timer(0.1, self._check_cmd_vel_timeout)
 
         self.get_logger().info(
-            "esp32_bridge: %s @ %d | odom_frame=%s base_frame=%s | tf=%s | mode=%d"
-            % (self.port, self.baud, self.odom_frame, self.base_frame,
-               self.publish_tf, self.esp32_mode))
+            "Listo. from_bridge -> /odom (tf %s) | /cmd_vel -> to_bridge "
+            "(wheel_sep=%.3fm, wheel_r=%.3fm, max_wheel_speed=%.2f rad/s, "
+            "cmd_vel_timeout=%.2fs)" % (
+                "habilitado" if self.get_parameter('publish_odom_tf').value else "deshabilitado",
+                self.get_parameter('wheel_separation').value,
+                self.get_parameter('wheel_radius').value,
+                self.get_parameter('max_wheel_speed').value,
+                self.get_parameter('cmd_vel_timeout').value,
+            )
+        )
 
-    # ---------------- Serie ----------------
-    def _open_port(self):
-        try:
-            self._ser = serial.Serial(
-                port=self.port, baudrate=self.baud,
-                timeout=0.05, write_timeout=0.2)
-            self._ser.reset_input_buffer()
-            self._ser.reset_output_buffer()
-            self.get_logger().info("Serial ESP32 abierto: %s" % self.port)
-            if self._pending_mode:
-                self._write(build_mode(self.esp32_mode))
-            return True
-        except Exception as exc:
-            self.get_logger().warn("No se pudo abrir %s: %s" % (self.port, exc),
-                                   throttle_duration_sec=2.0)
-            self._ser = None
-            return False
-
-    def _write(self, data):
-        with self._tx_lock:
-            if self._ser is not None and self._ser.is_open:
-                try:
-                    self._ser.write(data)
-                except Exception as exc:
-                    self.get_logger().warn("Error escribiendo serial: %s" % exc,
-                                           throttle_duration_sec=2.0)
-
-    def _reader_loop(self):
-        while self._running:
-            if self._ser is None or not self._ser.is_open:
-                if not self._open_port():
-                    self._sleep(1.0)
-                    continue
-            try:
-                waiting = self._ser.in_waiting
-                data = self._ser.read(waiting if waiting > 0 else 1)
-                if data:
-                    for msg_type, payload in self._buffer.feed(data):
-                        self._dispatch(msg_type, payload)
-            except Exception as exc:
-                self.get_logger().warn("Error leyendo serial: %s" % exc,
-                                       throttle_duration_sec=2.0)
-                try:
-                    self._ser.close()
-                except Exception:
-                    pass
-                self._ser = None
-                self._sleep(0.5)
-
-    def _sleep(self, s):
-        # sleep simple sin bloquear el spin (corre en hilo aparte).
-        import time
-        time.sleep(s)
-
-    def _dispatch(self, msg_type, payload):
-        if msg_type == TELEMETRY:
-            self._handle_telemetry(payload)
-        elif msg_type == ESP_HELLO:
-            self.get_logger().info("ESP32 HELLO")
-            if self._pending_mode:
-                self._write(build_mode(self.esp32_mode))
-
-    def _handle_telemetry(self, payload):
-        try:
-            data = json.loads(payload.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
+    # -------------------- from_bridge -> /odom --------------------
+    def _on_from_bridge(self, msg: Float32MultiArray) -> None:
+        if len(msg.data) < _FROM_BRIDGE_LEN:
+            self.get_logger().warn(
+                f"from_bridge: se esperaban {_FROM_BRIDGE_LEN} valores "
+                "[x,y,theta,v,w,setpoint_x,setpoint_y,setpoint_theta], "
+                f"llegaron {len(msg.data)}",
+                throttle_duration_sec=2.0,
+            )
             return
-        if not isinstance(data, dict):
-            return
-        odo = data.get("odo")
-        if not isinstance(odo, dict):
-            return
-        self._publish_odom(odo)
 
-    def _publish_odom(self, odo):
-        x = float(odo.get("x", 0.0))
-        y = float(odo.get("y", 0.0))
-        yaw = math.radians(float(odo.get("a", 0.0)))    # 'a' viene en grados
-        v = float(odo.get("v", 0.0))                    # m/s
-        w = math.radians(float(odo.get("w", 0.0)))      # 'w' viene en grados/s
-
+        x, y, theta, v, w, sx, sy, stheta = msg.data[:_FROM_BRIDGE_LEN]
         stamp = self.get_clock().now().to_msg()
-        qz = math.sin(yaw / 2.0)
-        qw = math.cos(yaw / 2.0)
+        self._publish_odom(x, y, theta, v, w, stamp)
+        self._publish_setpoint_echo(sx, sy, stheta, stamp)
 
-        msg = Odometry()
-        msg.header.stamp = stamp
-        msg.header.frame_id = self.odom_frame
-        msg.child_frame_id = self.base_frame
-        msg.pose.pose.position.x = x
-        msg.pose.pose.position.y = y
-        msg.pose.pose.orientation.z = qz
-        msg.pose.pose.orientation.w = qw
-        msg.twist.twist.linear.x = v
-        msg.twist.twist.angular.z = w
+    def _publish_odom(self, x, y, theta, v, w, stamp) -> None:
+        qx, qy, qz, qw = _yaw_to_quat(theta)
 
-        # Covarianzas diagonales razonables (x, y, yaw / vx, vyaw).
-        msg.pose.covariance[0] = 0.02
-        msg.pose.covariance[7] = 0.02
-        msg.pose.covariance[35] = 0.05
-        msg.twist.covariance[0] = 0.02
-        msg.twist.covariance[35] = 0.05
-        self.odom_pub.publish(msg)
+        odom = Odometry()
+        odom.header.stamp = stamp
+        odom.header.frame_id = self.get_parameter('odom_frame').value
+        odom.child_frame_id = self.get_parameter('base_frame').value
+        odom.pose.pose.position.x = x
+        odom.pose.pose.position.y = y
+        odom.pose.pose.orientation.x = qx
+        odom.pose.pose.orientation.y = qy
+        odom.pose.pose.orientation.z = qz
+        odom.pose.pose.orientation.w = qw
+        odom.twist.twist.linear.x = v
+        odom.twist.twist.angular.z = w
 
-        if self.tf_broadcaster is not None:
-            t = TransformStamped()
-            t.header.stamp = stamp
-            t.header.frame_id = self.odom_frame
-            t.child_frame_id = self.base_frame
-            t.transform.translation.x = x
-            t.transform.translation.y = y
-            t.transform.rotation.z = qz
-            t.transform.rotation.w = qw
-            self.tf_broadcaster.sendTransform(t)
+        lin_var = self.get_parameter('twist_linear_variance').value
+        ang_var = self.get_parameter('twist_angular_variance').value
+        cov = list(odom.twist.covariance)
+        cov[0] = lin_var    # vx
+        cov[7] = lin_var    # vy (robot no-holonómico: ~0 con misma confianza)
+        cov[35] = ang_var   # vyaw
+        odom.twist.covariance = cov
 
-    # ---------------- Comandos ----------------
-    def on_cmd_vel(self, msg):
-        self._last_cmd_time = self.get_clock().now()
-        self._write(build_vel(msg.linear.x, msg.angular.z))
+        self._pub_odom.publish(odom)
 
-    def _cmd_watchdog(self):
-        # Si NAV2 deja de mandar cmd_vel, mandar velocidad cero (frenar suave).
-        dt = (self.get_clock().now() - self._last_cmd_time).nanoseconds * 1e-9
-        if dt > self.cmd_timeout:
-            self._write(build_vel(0.0, 0.0))
+        if self.get_parameter('publish_odom_tf').value:
+            tf = TransformStamped()
+            tf.header.stamp = stamp
+            tf.header.frame_id = odom.header.frame_id
+            tf.child_frame_id = odom.child_frame_id
+            tf.transform.translation.x = x
+            tf.transform.translation.y = y
+            tf.transform.rotation.x = qx
+            tf.transform.rotation.y = qy
+            tf.transform.rotation.z = qz
+            tf.transform.rotation.w = qw
+            self._tf_broadcaster.sendTransform(tf)
 
-    def _send_heartbeat(self):
-        self._write(build_heartbeat())
+    def _publish_setpoint_echo(self, x, y, theta, stamp) -> None:
+        qx, qy, qz, qw = _yaw_to_quat(theta)
 
-    def destroy_node(self):
-        self._running = False
-        try:
-            self._write(build_brake())
-        except Exception:
-            pass
-        super().destroy_node()
+        pose = PoseStamped()
+        pose.header.stamp = stamp
+        pose.header.frame_id = self.get_parameter('map_frame').value
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        pose.pose.orientation.x = qx
+        pose.pose.orientation.y = qy
+        pose.pose.orientation.z = qz
+        pose.pose.orientation.w = qw
+        self._pub_setpoint_echo.publish(pose)
+
+    # -------------------- /cmd_vel -> to_bridge --------------------
+    def _on_cmd_vel(self, msg: Twist) -> None:
+        self._last_cmd_vel_time = self.get_clock().now()
+        self._cmd_vel_stopped = False
+
+        separation = self.get_parameter('wheel_separation').value
+        radius = self.get_parameter('wheel_radius').value
+        max_speed = self.get_parameter('max_wheel_speed').value
+
+        v_left = (msg.linear.x - msg.angular.z * separation / 2.0) / radius
+        v_right = (msg.linear.x + msg.angular.z * separation / 2.0) / radius
+
+        self._publish_wheel_cmd(v_left, v_right, max_speed, stop=False)
+
+    def _publish_wheel_cmd(self, v_left: float, v_right: float, max_speed: float,
+                            stop: bool) -> None:
+        if stop or max_speed <= 0.0:
+            left_cmd = right_cmd = 0.0
+        else:
+            scale = _CMD_FULL_SCALE / max_speed
+            left_cmd = max(-_CMD_FULL_SCALE, min(_CMD_FULL_SCALE, v_left * scale))
+            right_cmd = max(-_CMD_FULL_SCALE, min(_CMD_FULL_SCALE, v_right * scale))
+
+        out = Float32MultiArray()
+        out.data = [left_cmd, right_cmd, 1.0 if stop else 0.0]
+        self._pub_to_bridge.publish(out)
+
+    # -------------------- watchdog /cmd_vel --------------------
+    def _check_cmd_vel_timeout(self) -> None:
+        if self._last_cmd_vel_time is None or self._cmd_vel_stopped:
+            return
+
+        timeout = self.get_parameter('cmd_vel_timeout').value
+        elapsed = (self.get_clock().now() - self._last_cmd_vel_time).nanoseconds / 1e9
+        if elapsed > timeout:
+            self._cmd_vel_stopped = True
+            self._publish_wheel_cmd(0.0, 0.0, 0.0, stop=True)
+            self.get_logger().warn(
+                f"Sin /cmd_vel hace {elapsed:.2f}s (timeout={timeout:.2f}s); frenando.",
+                throttle_duration_sec=2.0,
+            )
 
 
-def main():
-    rclpy.init()
+def main(args=None) -> None:
+    rclpy.init(args=args)
     node = Esp32BridgeNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

@@ -103,6 +103,22 @@ def generate_launch_description():
         }],
     )
 
+    # Puente WebSocket hacia la GUI (capbot-host): difunde pose (TF map->base_link)
+    # y reenvia goals a la accion NavigateToPose. Incondicional: la pose funciona
+    # aunque enable_nav:=false; el goal solo surte efecto con NAV2 activo.
+    gui_bridge = Node(
+        package='test_bot', node_executable='gui_bridge_node',
+        node_name='gui_bridge_node', output='screen',
+        parameters=[{
+            'map_frame': 'map',
+            'base_frame': 'base_link',
+            'ws_host': '0.0.0.0',
+            'ws_port': 8766,
+            'publish_hz': 10.0,
+            'action_name': 'navigate_to_pose',
+        }],
+    )
+
     ekf_odom = Node(
         package='robot_localization', node_executable='ekf_node',
         node_name='ekf_filter_node_odom', output='screen',
@@ -176,7 +192,7 @@ def generate_launch_description():
             'markers_db',
             default_value=[PKG, '/config/markers_db_', map_name, '.yaml']),
 
-        rsp, camera, esp32, aruco, ekf_odom, ekf_map,
+        rsp, camera, esp32, aruco, gui_bridge, ekf_odom, ekf_map,
         map_server, planner, controller, recoveries, bt_nav, wp_follower,
         lifecycle_map, lifecycle_nav,
     ])

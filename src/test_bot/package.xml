@@ -28,6 +28,10 @@
   <!-- Localizacion -->
   <exec_depend>robot_localization</exec_depend>
 
+  <!-- gui_bridge_node: accion NavigateToPose hacia NAV2. El WebSocket usa
+       python3-websockets (instalar por pip3: pip3 install 'websockets<10'). -->
+  <exec_depend>nav2_msgs</exec_depend>
+
   <!-- NAV2 (Eloquent). OJO: 'nav2_recoveries' existe en Eloquent; en distros
        posteriores se renombro a 'nav2_behaviors'. Validar contra lo instalado. -->
   <exec_depend>nav2_bringup</exec_depend>

@@ -31,6 +31,11 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
   RENAME csi_camera_node
 )
+install(PROGRAMS
+  scripts/gui_bridge_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME gui_bridge_node
+)
 
 # esp32_bridge_node: en C++ (el puente real con capbot-jetson-bridge no
 # necesita Python; ver src/esp32_bridge_node.cpp).

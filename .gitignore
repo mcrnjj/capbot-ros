@@ -4,3 +4,7 @@ build/
 install/
 log/
 markers_print/
+doc/html
+*.cproject
+*.project
+*.settings
